@@ -65,7 +65,17 @@ def detect_language(text):
     except:
         return "en"  # Defaults to English if detection fails
 
-def get_prompt(language_code):
+def get_prompt(language_code: str) -> str:
+    """Return the prompt for the specified language code.
+
+    If the language code is not found in the prompts dictionary, return the English prompt as a fallback.
+
+    Args:
+        language_code (str): The ISO 639-1 language code.
+
+    Returns:
+        str: The prompt for the specified language code.
+    """
     return prompts.get(language_code, prompts["en"])
 #-------------------------------------------------------------------
 # Transcript Collection and Preprocessing
@@ -175,7 +185,6 @@ def multi_query_processing(user_query):
         top_matches_indices = np.argsort(similarities)[-3:][::-1]
         top_matches_texts = [all_metadatas[i] for i in top_matches_indices]
         all_retrieved_texts.extend(top_matches_texts)
-
         time.sleep(1)  # Add a delay to avoid rate limits
 
     consolidated_context = truncate_text(" ".join(all_retrieved_texts))
