@@ -41,6 +41,10 @@ video_ids = [
     'vad1wAe5mB4', 'Q1mRVn0WCrU&t', 'UhkwrgasKlU'
 ]
 
+# Initialize ChromaDB and Collection
+chroma_client = chromadb.Client()
+collection_name = "totk_transcripts"
+collection = chroma_client.get_or_create_collection(name=collection_name)
 #----------------------------------------------------------------
 # MODEL DEVELOPMENT||||||||||||||||||||||||||||||||||||||||||||||
 #----------------------------------------------------------------
@@ -65,20 +69,9 @@ def detect_language(text):
     except:
         return "en"  # Defaults to English if detection fails
 
-def get_prompt(language_code: str) -> str:
-    """Return the prompt for the specified language code.
-
-    If the language code is not found in the prompts dictionary, return the English prompt as a fallback.
-
-    Args:
-        language_code (str): The ISO 639-1 language code.
-
-    Returns:
-        str: The prompt for the specified language code.
-    """
+def get_prompt(language_code):
     return prompts.get(language_code, prompts["en"])
 #-------------------------------------------------------------------
-# Transcript Collection and Preprocessing
 def get_transcript(video_id):
     try:
         transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en-GB'])
@@ -87,27 +80,9 @@ def get_transcript(video_id):
     except Exception as e:
         print(f"Error retrieving transcript for video {video_id}: {e}")
         return None
-
-transcripts = {video_id: get_transcript(video_id) for video_id in video_ids}
-transcripts_df = pd.DataFrame(list(transcripts.items()), columns=['Video ID', 'Transcript'])
-
-# Save all transcripts to a single .txt file for later use on evaluation
-with open("transcripts.txt", "w", encoding="utf-8") as file:
-    for index, row in transcripts_df.iterrows():
-        file.write(f"Video ID: {row['Video ID']}\n")
-        file.write("Transcript:\n")
-        file.write(row['Transcript'] + "\n")
-        file.write("-" * 80 + "\n\n")  # Separator between transcripts
-
-print("All transcripts have been saved to transcripts.txt.")
-
 #---------------------------------------------------------------------
 #CHUNKING AND EMBEDDING STORAGE USING CHROMADB||||||||||||||||||||||||
 #---------------------------------------------------------------------
-# Chunking
-chroma_client = chromadb.Client()
-collection = chroma_client.get_or_create_collection(name="totk_transcripts")
-
 def split_text(text, max_tokens=4000):
     words = text.split()
     chunks = []
@@ -117,7 +92,6 @@ def split_text(text, max_tokens=4000):
     for word in words:
         current_tokens += 1
         current_chunk.append(word)
-
         if current_tokens >= max_tokens:
             chunks.append(" ".join(current_chunk))
             current_chunk = []
@@ -125,58 +99,49 @@ def split_text(text, max_tokens=4000):
 
     if current_chunk:
         chunks.append(" ".join(current_chunk))
-
     return chunks
 #--------------------------------------------------------------------
-# Embedding Storage
-def store_transcript_embeddings(video_id, transcript_text):
-    text_chunks = split_text(transcript_text)
-    print("Text chunks:", text_chunks)  # Debug to check chunks
+def store_all_transcripts_embeddings():
+    if collection.count() > 0:
+        print("Embeddings already exist in the collection, skipping embedding process.")
+        return
+    
+    transcripts = {video_id: get_transcript(video_id) for video_id in video_ids}
+    for video_id, transcript_text in transcripts.items():
+        if transcript_text:
+            text_chunks = split_text(transcript_text)
+            for i, chunk in enumerate(text_chunks):
+                embedding = openai.Embedding.create(input=[chunk], model="text-embedding-ada-002")['data'][0]['embedding']
+                chunk_id = f"{video_id}_chunk_{i}"
+                collection.add(
+                    ids=[chunk_id],
+                    embeddings=[embedding],
+                    metadatas=[{'video_id': video_id, 'chunk_index': i, 'text': chunk}]
+                )
+    print("Transcript embeddings have been stored.")
 
-    for i, chunk in enumerate(text_chunks):
-        embedding = openai.Embedding.create(input=[chunk], model="text-embedding-ada-002")['data'][0]['embedding']
-        chunk_id = f"{video_id}_chunk_{i}"
-
-        try:
-            collection.add(
-                ids=[chunk_id],
-                embeddings=[embedding],
-                metadatas=[{'video_id': video_id, 'chunk_index': i, 'text': chunk}]
-            )
-            print(f"Stored chunk {chunk_id} successfully.")
-        except Exception as e:
-            print(f"Error storing chunk {chunk_id}: {e}")
-
-for index, row in transcripts_df.iterrows():
-    store_transcript_embeddings(row['Video ID'], row['Transcript'])
-
-all_items = collection.get(include=['metadatas', 'embeddings'])
-for item_metadata in all_items['metadatas']:
-    print("Metadata:", item_metadata)
+# Call this once at initialization
+store_all_transcripts_embeddings()
 #-------------------------------------------------------------------
 #QA MODEL AND RETRIEVAL SETUP
 #-------------------------------------------------------------------
 #QA Model and Retrieval System Setup
 def truncate_text(text, max_tokens=3000):
     words = text.split()
-    if len(words) > max_tokens:
-        return " ".join(words[:max_tokens])
-    return text
+    return " ".join(words[:max_tokens]) if len(words) > max_tokens else text
 
 def multi_query_processing(user_query):
     related_queries = [
         user_query,
         f"Background on {user_query}",
         f"Historical context of {user_query}",
-        f"Role of {user_query} in the context of Tears of the Kingdom",
+        f"Role of {user_query} in Tears of the Kingdom",
         f"Significance of {user_query}"
     ]
     all_retrieved_texts = []
 
     for sub_query in related_queries:
-        print(f"Processing sub-query: {sub_query}")
         query_embedding = openai.Embedding.create(input=[sub_query], model="text-embedding-ada-002")['data'][0]['embedding']
-        
         all_embeddings_data = collection.get(include=['metadatas', 'embeddings'])
         all_embeddings = [item for item in all_embeddings_data['embeddings']]
         all_metadatas = [meta['text'] for meta in all_embeddings_data['metadatas']]
@@ -187,19 +152,14 @@ def multi_query_processing(user_query):
         all_retrieved_texts.extend(top_matches_texts)
         time.sleep(1)  # Add a delay to avoid rate limits
 
-    consolidated_context = truncate_text(" ".join(all_retrieved_texts))
-    prompt = f"Based on the following content:\n{consolidated_context}\nAnswer the question: {user_query}"
-
-    print("Consolidated Context:", consolidated_context[:500])  # Debugging
-    print("Generated prompt:", prompt)
-    return prompt
+    return truncate_text(" ".join(all_retrieved_texts))
 #-------------------------------------------------------------------
 def generate_multi_query_response(user_query):
     # Detect language of the user's input
     detected_language = detect_language(user_query)
     print("Detected language:", detected_language)
 
-    # Use multi-query processing to get aggregated context from ChromaDB
+    # multi-query processing to get aggregated context from ChromaDB
     prompt = multi_query_processing(user_query)
     print("Consolidated Context from ChromaDB:", prompt)
 
@@ -220,14 +180,14 @@ def generate_multi_query_response(user_query):
         "Response:\nAnswer: <your response here>"
     )
 
-    # Process and store the response in a structured way
+    # Process and store the response
     response_text = ""
     response = openai.ChatCompletion.create(
         model="gpt-3.5-turbo",
         messages=[{"role": "user", "content": enhanced_prompt}],
         max_tokens=150,
         temperature=0.7,
-        stream=True  # Enable streaming
+        stream=True
     )
 
     for chunk in response:
@@ -237,7 +197,7 @@ def generate_multi_query_response(user_query):
 
     print("\nGenerated Answer:", response_text)
 
-    # Return the response text wrapped in an "Answer" key for easier parsing
+    
     return f"Answer: {response_text}" if response_text else "Answer: No relevant information found."
 
 
@@ -266,8 +226,7 @@ agent = initialize_agent(
     verbose=True,
     handle_parsing_errors=True
 )
-agent.run({"input": "What did Mineru do?"}) 
-#--------------------------------------------------------------
+agent.run({"input": "O que aconteceu à Mineru?"})   # Portuguese#--------------------------------------------------------------
 #MULTIMODAL INTERACTION||||||||||||||||||||||||||||||||||||||||
 #--------------------------------------------------------------
 #Text/Voice input and output
@@ -316,7 +275,7 @@ def handle_input(input_text=None, input_audio=None):
     # Generate audio using Eleven Labs for the response
     audio_path = text_to_speech(response_text)
     
-    return response_text, audio_path  # Return both text and audio path
+    return response_text, audio_path
 #----------------------------------------------------------------------
 #DEPLOYMENT||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
 #----------------------------------------------------------------------
