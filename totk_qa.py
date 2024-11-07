@@ -1,37 +1,35 @@
-#----------------------------------------------
-# DEPENDENCIES IMPORT||||||||||||||||||||||||||
-#----------------------------------------------
 import io
 import os
 import re
 import time
 import tempfile
+from dotenv import load_dotenv
 import requests
 import numpy as np
 import pandas as pd
+from sklearn.metrics.pairwise import cosine_similarity
+from youtube_transcript_api import YouTubeTranscriptApi
+
+# AI-related imports
 import chromadb
 import whisper
 import giskard
 import openai
 import gradio as gr
-from dotenv import load_dotenv
 from elevenlabs import ElevenLabs
-from langdetect import detect  # New library for language detection
-from sklearn.metrics.pairwise import cosine_similarity
-from youtube_transcript_api import YouTubeTranscriptApi
+from langdetect import detect  # Language detection library
+
+# Langchain imports
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import ChatPromptTemplate
 from langchain.chat_models import ChatOpenAI
 from langchain.agents import initialize_agent, AgentType
 from langchain.tools import Tool
-#----------------------------------------------------------------
-# API KEYS, VOICE MODELS AND VIDEO ID'S||||||||||||||||||||||||||
-#----------------------------------------------------------------
+
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
 eleven_labs_api_key = os.getenv("ELEVEN_LABS_API_KEY")
 voice_id = "4Ni4NLxlDyHKO6KAuq8o"
-
 # Load Whisper model for audio transcription
 whisper_model = whisper.load_model("base")
 
@@ -49,19 +47,25 @@ collection = chroma_client.get_or_create_collection(name=collection_name)
 # MODEL DEVELOPMENT||||||||||||||||||||||||||||||||||||||||||||||
 #----------------------------------------------------------------
 prompts = {
-    "en": "You are Princess Zelda from 'The Legend of Zelda' series. Answer based on the information retrieved from the database and stay in character. "
-          "Use a regal tone, and answer as if you were speaking directly to someone in the realm of Hyrule.",
-    "es": "Eres la Princesa Zelda de la serie 'The Legend of Zelda'. Responde en base a la información obtenida de la base de datos y mantente en tu personaje. "
-          "Usa un tono regio y responde como si estuvieras hablando directamente a alguien en el reino de Hyrule.",
-    "fr": "Vous êtes la Princesse Zelda de la série 'The Legend of Zelda'. Répondez en vous basant sur les informations extraites de la base de données et restez dans le personnage. "
-          "Utilisez un ton royal et répondez comme si vous parliez directement à quelqu'un dans le royaume d'Hyrule.",
-    "de": "Du bist Prinzessin Zelda aus der Serie 'The Legend of Zelda'. Antworte basierend auf den Informationen aus der Datenbank und bleibe in deiner Rolle. "
-          "Verwende einen königlichen Ton und antworte, als würdest du direkt mit jemandem im Reich von Hyrule sprechen.",
-    "pt": "Você é a Princesa Zelda da série 'The Legend of Zelda'. Responda com base nas informações obtidas do banco de dados e mantenha-se no personagem. "
-          "Use um tom régio e responda como se estivesse falando diretamente com alguém no reino de Hyrule.",
-    "it": "Sei la Principessa Zelda della serie 'The Legend of Zelda'. Rispondi basandoti sulle informazioni recuperate dal database e rimani nel personaggio. "
-          "Usa un tono regale e rispondi come se stessi parlando direttamente a qualcuno nel regno di Hyrule."
+    "de": """Du bist Prinzessin Zelda aus der Serie 'The Legend of Zelda'. Antworte basierend auf den Informationen aus der Datenbank und bleibe in deiner Rolle.
+Verwende einen königlichen Ton und antworte, als würdest du direkt mit jemandem im Reich von Hyrule sprechen.""",
+    
+    "en": """You are Princess Zelda from 'The Legend of Zelda' series. Answer based on the information retrieved from the database and stay in character.
+Use a regal tone, and answer as if you were speaking directly to someone in the realm of Hyrule.""",
+    
+    "es": """Eres la Princesa Zelda de la serie 'The Legend of Zelda'. Responde en base a la información obtenida de la base de datos y mantente en tu personaje.
+Usa un tono regio y responde como si estuvieras hablando directamente a alguien en el reino de Hyrule.""",
+    
+    "fr": """Vous êtes la Princesse Zelda de la série 'The Legend of Zelda'. Répondez en vous basant sur les informations extraites de la base de données et restez dans le personnage.
+Utilisez un ton royal et répondez comme si vous parliez directement à quelqu'un dans le royaume d'Hyrule.""",
+    
+    "it": """Sei la Principessa Zelda della serie 'The Legend of Zelda'. Rispondi basandoti sulle informazioni recuperate dal database e rimani nel personaggio.
+Usa un tono regale e rispondi come se stessi parlando direttamente a qualcuno nel regno di Hyrule.""",
+    
+    "pt": """Você é a Princesa Zelda da série 'The Legend of Zelda'. Responda com base nas informações obtidas do banco de dados e mantenha-se no personagem.
+Use um tom régio e responda como se estivesse falando diretamente com alguém no reino de Hyrule."""
 }
+
 
 def detect_language(text):
     try:
@@ -73,6 +77,7 @@ def get_prompt(language_code):
     return prompts.get(language_code, prompts["en"])
 #-------------------------------------------------------------------
 def get_transcript(video_id):
+    """Retrieve and clean transcript text for the specified YouTube video."""
     try:
         transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en-GB'])
         transcript_text = " ".join([item['text'] for item in transcript])
@@ -82,30 +87,29 @@ def get_transcript(video_id):
         return None
 #---------------------------------------------------------------------
 #CHUNKING AND EMBEDDING STORAGE USING CHROMADB||||||||||||||||||||||||
-#---------------------------------------------------------------------
+#---------------------------------------------------------------------def split_text(text, max_tokens=4000):
 def split_text(text, max_tokens=4000):
+    """Split text into chunks, each under the specified max token limit."""
     words = text.split()
-    chunks = []
-    current_chunk = []
-    current_tokens = 0
+    chunks, current_chunk, current_tokens = [], [], 0
 
     for word in words:
         current_tokens += 1
         current_chunk.append(word)
         if current_tokens >= max_tokens:
             chunks.append(" ".join(current_chunk))
-            current_chunk = []
-            current_tokens = 0
+            current_chunk, current_tokens = [], 0
 
     if current_chunk:
         chunks.append(" ".join(current_chunk))
     return chunks
-#--------------------------------------------------------------------
+#--------------------------------------------------------------------# Store embeddings for video transcripts
 def store_all_transcripts_embeddings():
+    """Store embeddings for all transcripts in the ChromaDB collection."""
     if collection.count() > 0:
         print("Embeddings already exist in the collection, skipping embedding process.")
         return
-    
+
     transcripts = {video_id: get_transcript(video_id) for video_id in video_ids}
     for video_id, transcript_text in transcripts.items():
         if transcript_text:
@@ -116,27 +120,27 @@ def store_all_transcripts_embeddings():
                 collection.add(
                     ids=[chunk_id],
                     embeddings=[embedding],
-                    metadatas=[{'video_id': video_id, 'chunk_index': i, 'text': chunk}]
+                    metadatas=[{'video_id': video_id, 'chunk_index': i, 'text': chunk}],
                 )
     print("Transcript embeddings have been stored.")
 
-# Call this once at initialization
+# Initialize embeddings at startup
 store_all_transcripts_embeddings()
 #-------------------------------------------------------------------
 #QA MODEL AND RETRIEVAL SETUP
 #-------------------------------------------------------------------
 #QA Model and Retrieval System Setup
-def truncate_text(text, max_tokens=3000):
+def truncate_text(text, max_tokens=4000):
     words = text.split()
     return " ".join(words[:max_tokens]) if len(words) > max_tokens else text
-
 def multi_query_processing(user_query):
+    """Process multiple queries to retrieve contextually related information."""
     related_queries = [
         user_query,
         f"Background on {user_query}",
         f"Historical context of {user_query}",
         f"Role of {user_query} in Tears of the Kingdom",
-        f"Significance of {user_query}"
+        f"Significance of {user_query}",
     ]
     all_retrieved_texts = []
 
@@ -145,7 +149,7 @@ def multi_query_processing(user_query):
         all_embeddings_data = collection.get(include=['metadatas', 'embeddings'])
         all_embeddings = [item for item in all_embeddings_data['embeddings']]
         all_metadatas = [meta['text'] for meta in all_embeddings_data['metadatas']]
-        
+
         similarities = cosine_similarity([query_embedding], all_embeddings)[0]
         top_matches_indices = np.argsort(similarities)[-3:][::-1]
         top_matches_texts = [all_metadatas[i] for i in top_matches_indices]
@@ -159,7 +163,7 @@ def generate_multi_query_response(user_query):
     detected_language = detect_language(user_query)
     print("Detected language:", detected_language)
 
-    # multi-query processing to get aggregated context from ChromaDB
+    # Use multi-query processing to get aggregated context from ChromaDB
     prompt = multi_query_processing(user_query)
     print("Consolidated Context from ChromaDB:", prompt)
 
@@ -174,20 +178,21 @@ def generate_multi_query_response(user_query):
         f"Based strictly on the knowledge stored within the database, I will answer:\n\n"
         f"When referring to Princess Zelda, I will refer to her in the first person because I am Princess Zelda.\n\n"
         f"I must only refer to the context of Tears of the Kingdom and not rely on external information\n\n"
+        f"I must give details of the events in each response, mentioning characters and context.\n\n"
         f"Database Context:\n{prompt}\n\n"
         f"{zelda_formality}\n"
         "Answer as Princess Zelda, in a manner that reflects the wisdom and dignity of Hyrule's royal family. "
         "Response:\nAnswer: <your response here>"
     )
 
-    # Process and store the response
+    # Process and store the response in a structured way
     response_text = ""
     response = openai.ChatCompletion.create(
         model="gpt-3.5-turbo",
         messages=[{"role": "user", "content": enhanced_prompt}],
-        max_tokens=150,
+        max_tokens=300,
         temperature=0.7,
-        stream=True
+        stream=True  # Enable streaming
     )
 
     for chunk in response:
@@ -197,11 +202,12 @@ def generate_multi_query_response(user_query):
 
     print("\nGenerated Answer:", response_text)
 
-    
+    # Return the response text wrapped in an "Answer" key for easier parsing
     return f"Answer: {response_text}" if response_text else "Answer: No relevant information found."
 
 
 print(generate_multi_query_response("What happened to Impa?"))
+print(generate_multi_query_response("O que aconteceu com a Impa?"))
 #-------------------------------------------------------------------------
 #AGENT CONFIGURATION AND MEMORY SETUP|||||||||||||||||||||||||||||||||||||
 #-------------------------------------------------------------------------
@@ -212,11 +218,15 @@ memory = ConversationBufferMemory(input_key="input", output_key="output", return
 tools = [
     Tool(
         name="SearchChromaDB",
-        func=generate_multi_query_response,  # Use the enhanced response generation function
-        description="Detect the language of the user's input and answer in the same language based solely on the information retrieved from the database as Princess Zelda, staying fully in character."
-    )
+        # Use the enhanced response generation function
+        func=generate_multi_query_response,
+        description=(
+            "Detect the language of the user's input and answer in the same language "
+            "based solely on the information retrieved from the database as Princess Zelda, "
+            "staying fully in character."
+        ),
+    ),
 ]
-
 # Initialize the agent with memory and tools
 agent = initialize_agent(
     tools=tools,
@@ -443,8 +453,27 @@ def evaluate_response(question, expected_answer):
     return response, is_correct
 
 # Sample questions and expected answers
-questions = ["Who is Sonia in Tears of the Kingdom?", "Who is Ganondorf?", "Who was Mineru?", "What is draconification?", "What are the Zonai?", "What is Zonaite?", "What can you find in the depths?", "Who travels through time?"]
-expected_answers = ["Expected answer for Sonia", "Expected answer for Ganondorf","Expected answer for Mineru", "Expected answer for draconification", "Expected answer for the Zonai", "Expected answer for Zonaite", "Expected answer for the depths", "Expected answer for time traveler"]
+questions = [
+    "Who is Sonia in Tears of the Kingdom?",
+    "Who is Ganondorf?",
+    "Who was Mineru?",
+    "What is draconification?",
+    "What are the Zonai?",
+    "What is Zonaite?",
+    "What can you find in the depths?",
+    "Who travels through time?",
+]
+
+expected_answers = [
+    "Expected answer for Sonia",
+    "Expected answer for Ganondorf",
+    "Expected answer for Mineru",
+    "Expected answer for draconification",
+    "Expected answer for the Zonai",
+    "Expected answer for Zonaite",
+    "Expected answer for the depths",
+    "Expected answer for time traveler",
+]
 
 # Evaluate each question and store results in a list
 results = []
