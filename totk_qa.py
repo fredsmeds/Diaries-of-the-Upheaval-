@@ -26,25 +26,26 @@ from langchain.chat_models import ChatOpenAI
 from langchain.agents import initialize_agent, AgentType
 from langchain.tools import Tool
 
+# Load environment variables
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
 eleven_labs_api_key = os.getenv("ELEVEN_LABS_API_KEY")
+
 voice_id = "4Ni4NLxlDyHKO6KAuq8o"
-# Load Whisper model for audio transcription
+
+# Initialize the Whisper model
 whisper_model = whisper.load_model("base")
 
-# Define video IDs
+# Define video IDs to retrieve transcripts from YouTube
 video_ids = [
     'hZytp1sIZAw', 'qP1Fw2EpwqE', 'JuhBs44odO0', 'w31M0LoVUO8',
-    'vad1wAe5mB4', 'Q1mRVn0WCrU&t', 'UhkwrgasKlU'
+    'vad1wAe5mB4', 'Q1mRVn0WCrU&t', 'UhkwrgasKlU',
 ]
 
 # Initialize ChromaDB and Collection
 chroma_client = chromadb.Client()
 collection_name = "totk_transcripts"
 collection = chroma_client.get_or_create_collection(name=collection_name)
-#----------------------------------------------------------------
-# MODEL DEVELOPMENT||||||||||||||||||||||||||||||||||||||||||||||
 #----------------------------------------------------------------
 prompts = {
     "de": """Du bist Prinzessin Zelda aus der Serie 'The Legend of Zelda'. Antworte basierend auf den Informationen aus der Datenbank und bleibe in deiner Rolle.
@@ -65,8 +66,6 @@ Usa un tono regale e rispondi come se stessi parlando direttamente a qualcuno ne
     "pt": """Você é a Princesa Zelda da série 'The Legend of Zelda'. Responda com base nas informações obtidas do banco de dados e mantenha-se no personagem.
 Use um tom régio e responda como se estivesse falando diretamente com alguém no reino de Hyrule."""
 }
-
-
 def detect_language(text):
     try:
         return detect(text)
