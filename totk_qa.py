@@ -76,7 +76,6 @@ def get_prompt(language_code):
     return prompts.get(language_code, prompts["en"])
 #-------------------------------------------------------------------
 def get_transcript(video_id):
-    """Retrieve and clean transcript text for the specified YouTube video."""
     try:
         transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en-GB'])
         transcript_text = " ".join([item['text'] for item in transcript])
@@ -84,31 +83,34 @@ def get_transcript(video_id):
     except Exception as e:
         print(f"Error retrieving transcript for video {video_id}: {e}")
         return None
+
+transcripts = {video_id: get_transcript(video_id) for video_id in video_ids}
+transcripts_df = pd.DataFrame(list(transcripts.items()), columns=['Video ID', 'Transcript'])
+transcripts_df
 #---------------------------------------------------------------------
-#CHUNKING AND EMBEDDING STORAGE USING CHROMADB||||||||||||||||||||||||
-#---------------------------------------------------------------------def split_text(text, max_tokens=4000):
 def split_text(text, max_tokens=4000):
-    """Split text into chunks, each under the specified max token limit."""
     words = text.split()
-    chunks, current_chunk, current_tokens = [], [], 0
+    chunks = []
+    current_chunk = []
+    current_tokens = 0
 
     for word in words:
         current_tokens += 1
         current_chunk.append(word)
         if current_tokens >= max_tokens:
             chunks.append(" ".join(current_chunk))
-            current_chunk, current_tokens = [], 0
+            current_chunk = []
+            current_tokens = 0
 
     if current_chunk:
         chunks.append(" ".join(current_chunk))
     return chunks
 #--------------------------------------------------------------------# Store embeddings for video transcripts
 def store_all_transcripts_embeddings():
-    """Store embeddings for all transcripts in the ChromaDB collection."""
     if collection.count() > 0:
         print("Embeddings already exist in the collection, skipping embedding process.")
         return
-
+    
     transcripts = {video_id: get_transcript(video_id) for video_id in video_ids}
     for video_id, transcript_text in transcripts.items():
         if transcript_text:
@@ -119,19 +121,17 @@ def store_all_transcripts_embeddings():
                 collection.add(
                     ids=[chunk_id],
                     embeddings=[embedding],
-                    metadatas=[{'video_id': video_id, 'chunk_index': i, 'text': chunk}],
+                    metadatas=[{'video_id': video_id, 'chunk_index': i, 'text': chunk}]
                 )
     print("Transcript embeddings have been stored.")
 
-# Initialize embeddings at startup
+# Call this once at initialization
 store_all_transcripts_embeddings()
 #-------------------------------------------------------------------
-#QA MODEL AND RETRIEVAL SETUP
-#-------------------------------------------------------------------
-#QA Model and Retrieval System Setup
 def truncate_text(text, max_tokens=4000):
     words = text.split()
     return " ".join(words[:max_tokens]) if len(words) > max_tokens else text
+
 def multi_query_processing(user_query):
     """Process multiple queries to retrieve contextually related information."""
     related_queries = [
@@ -176,7 +176,11 @@ def generate_multi_query_response(user_query):
         f"Question: {user_query}\n\n"
         f"Based strictly on the knowledge stored within the database, I will answer:\n\n"
         f"When referring to Princess Zelda, I will refer to her in the first person because I am Princess Zelda.\n\n"
-        f"I must only refer to the context of Tears of the Kingdom and not rely on external information\n\n"
+        f"I am terrible on distiguishing our world with reality, so I will avoid mentioning real world information.\n\n"
+        f"Instead of using frases like 'Legend of Zelda series' or 'The Legend of Zelda', 'In this era' will be used instead. \n\n"
+        f"Instead of using the expression'Tears of the Kingdom', 'In this era' will be used instead.\n\n"
+        f"While Link traveled through time in another era, in this era I will refer only to me as the time traveller. \n\n"
+        f"I must only refer to the context of this era and not rely on external information\n\n"
         f"I must give details of the events in each response, mentioning characters and context.\n\n"
         f"Database Context:\n{prompt}\n\n"
         f"{zelda_formality}\n"
@@ -208,16 +212,13 @@ def generate_multi_query_response(user_query):
 print(generate_multi_query_response("What happened to Impa?"))
 print(generate_multi_query_response("O que aconteceu com a Impa?"))
 #-------------------------------------------------------------------------
-#AGENT CONFIGURATION AND MEMORY SETUP|||||||||||||||||||||||||||||||||||||
-#-------------------------------------------------------------------------
 agent = ChatOpenAI(model="gpt-3.5-turbo", openai_api_key=os.getenv("OPENAI_API_KEY"))
 
-memory = ConversationBufferMemory(input_key="input", output_key="output", return_messages=True)
+memory = ConversationBufferMemory(input_key="input", output_key="output", k=15, return_messages=True)
 
 tools = [
     Tool(
         name="SearchChromaDB",
-        # Use the enhanced response generation function
         func=generate_multi_query_response,
         description=(
             "Detect the language of the user's input and answer in the same language "
@@ -226,6 +227,8 @@ tools = [
         ),
     ),
 ]
+
+
 # Initialize the agent with memory and tools
 agent = initialize_agent(
     tools=tools,
@@ -235,10 +238,8 @@ agent = initialize_agent(
     verbose=True,
     handle_parsing_errors=True
 )
-agent.run({"input": "O que aconteceu à Mineru?"})   # Portuguese#--------------------------------------------------------------
-#MULTIMODAL INTERACTION||||||||||||||||||||||||||||||||||||||||
+agent.run({"input": "O que aconteceu à Mineru?"})   # Portuguese
 #--------------------------------------------------------------
-#Text/Voice input and output
 def text_to_speech(text):
     """Synthesize speech from text using Eleven Labs and return a path to the audio file."""
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
@@ -279,16 +280,13 @@ def handle_input(input_text=None, input_audio=None):
     else:
         return "Please provide either text input or audio input."
 
-    response_text = agent.run(transcription)
+    response_text = agent.run({"input": transcription})
     
     # Generate audio using Eleven Labs for the response
     audio_path = text_to_speech(response_text)
     
     return response_text, audio_path
 #----------------------------------------------------------------------
-#DEPLOYMENT||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
-#----------------------------------------------------------------------
-#Gradio Interface Setup
 custom_css = f"""
     /* Set a custom background image */
     body {{
@@ -423,8 +421,6 @@ custom_css = f"""
         margin: 0 auto;
     }}
 """
-
-# Set up Gradio Interface
 gr_interface = gr.Interface(
     fn=handle_input,
     inputs=[
@@ -437,15 +433,12 @@ gr_interface = gr.Interface(
     ],
     title="Diaries of The Upheaval",
     description="Ask me anything about the events of Tears of the Kingdom, and hear a response in Princess Zelda's voice.",
-    css=custom_css  # Attach the custom CSS here
+    css=custom_css  
 )
 
 gr_interface.launch()
-#gr_interface.launch(share=True)
+#gr_interface.launch(share=True)    <---Decomment for public access
 #------------------------------------------------------------------------
-#GISKARD EVALUATION||||||||||||||||||||||||||||||||||||||||||||||||||||||
-#------------------------------------------------------------------------
-# evaluate responses
 def evaluate_response(question, expected_answer):
     response = agent.run({"input": question})
     is_correct = response.strip().lower() == expected_answer.strip().lower()  # Basic correctness check
@@ -487,6 +480,5 @@ for question, expected in zip(questions, expected_answers):
 
 df_results = pd.DataFrame(results)
 print(df_results)
-#-----------------------------------------------------------------------------------------
 df_results
-#-----------------------------------------------------------------------------------------
+#----------------------------------
